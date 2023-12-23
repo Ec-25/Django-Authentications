@@ -1,0 +1,7 @@
+temp
+env
+__pycache__
+migrations
+backend
+db.sqlite3
+manager.py
