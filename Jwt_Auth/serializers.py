@@ -1,149 +1,233 @@
 from rest_framework import serializers
-from .models import User
-from Server.common_utilities import send_email
-from Server.settings import EMAIL_HOST_USER
-from django.utils.encoding import smart_str, force_bytes, DjangoUnicodeDecodeError
-from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from secrets import token_urlsafe
+from rest_framework.exceptions import AuthenticationFailed
+from django.contrib.auth import authenticate
+from .models import User, OneTimePassword
+from .utils import (
+    send_password_reset_email,
+    get_user_id_by_uidb64,
+    check_for_password_reset_user_token,
+    get_tokens,
+    delete_outstanding_token,
+    delete_all_outstanding_tokens,
+)
 
 
-class UserSignUpSerializer(serializers.ModelSerializer):
-    # Additional field to confirm the password during registration
-    passConfirm = serializers.CharField(style={'input_type': 'password'}, write_only=True)
+class UserProfileSerializer(serializers.ModelSerializer):
+    def to_representation(self, instance):
+        return {"email": instance.email, "full_name": instance.get_full_name()}
+
+
+class UserRegisterSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    first_name = serializers.CharField(max_length=63)
+    last_name = serializers.CharField(max_length=63)
+    password = serializers.CharField(max_length=100, min_length=8, write_only=True)
+    password2 = serializers.CharField(max_length=100, min_length=8, write_only=True)
 
     class Meta:
         model = User
-        fields = ['email', 'username', 'first_name', 'last_name', 'password', 'passConfirm']
-        extra_kwargs = {
-            'password': {'write_only': True}
-        }
+        fields = ["email", "first_name", "last_name", "password", "password2"]
 
-    def validate(self, attrs):
-        # Validate that the password and its confirmation match
-        password = attrs.get('password')
-        passConfirm = attrs.pop('passConfirm')
-
-        if password != passConfirm:
-            raise serializers.ValidationError({'password': 'Passwords do not match'})
-
-        # Generate a unique verification token
-        verification_token = token_urlsafe(16)
-
-        # Store the verification token in the user instance
-        attrs['verification_token'] = verification_token
-
-        # Build the verification link using the context
-        request = self.context.get('request')
-        verify_link = f'{request.scheme}://{request.get_host()}{request.path_info.split("/", 2)[0]}/auth/verify-email/{verification_token}/'
-
-        # Send the verification token via email
-        # DEBUG: Print the link to the console during development
-        # print(verify_link)
-        # PRODUCTION: Uncomment the following line to send a real email
-        send_email(contact='Verify Email', subject='Verify your email address',
-                   recipients=[attrs['email']],
-                   message=f"Enter the following link to validate your Portfolio service account: {verify_link}",
-                   host=EMAIL_HOST_USER)
-
-        return attrs
+    def validate(self, data):
+        password = data.get("password")
+        password2 = data.pop("password2")
+        if password != password2:
+            raise serializers.ValidationError("Passwords do not match")
+        return data
 
     def create(self, validated_data):
-        # Create a new user using the custom user manager
         return User.objects.create_user(**validated_data)
 
 
-class UserSingInSerializer (serializers.ModelSerializer):
-    email = serializers.EmailField(max_length=255)
+class VerifyEmailSerializer(serializers.Serializer):
+    code = serializers.CharField()
+
+    def validate(self, data):
+        code = data.get("code")
+
+        if not code:
+            raise serializers.ValidationError("Code is required!")
+
+        try:
+            user_code_obj = OneTimePassword.objects.get(code=code)
+            user = user_code_obj.user
+
+            if user.is_active:
+                raise serializers.ValidationError("Email already verified!")
+
+            user.is_active = True
+            user.save()
+            user_code_obj.delete()
+
+        except User.DoesNotExist:
+            raise serializers.ValidationError(f"Invalid verification code 1!  - {code}")
+
+        except OneTimePassword.DoesNotExist:
+            raise serializers.ValidationError(f"Invalid verification code 2! - {code}")
+
+        return data
+
+
+class UserLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(max_length=100, min_length=8, write_only=True)
+    full_name = serializers.CharField(max_length=100, read_only=True)
+    tokens = serializers.DictField(read_only=True)
+
     class Meta:
         model = User
-        fields = ['email', 'password']
+        fields = ["email", "password", "full_name", "tokens"]
+
+    def validate(self, data):
+        email = data.get("email")
+        password = data.get("password")
+        request = self.context.get("request")
+
+        user = authenticate(request=request, email=email, password=password)
+
+        if not user:
+            raise AuthenticationFailed("Invalid credentials!")
+        if not user.is_active:
+            raise AuthenticationFailed("Account is not active!")
+
+        return {
+            "email": user.email,
+            "full_name": user.get_full_name(),
+            "tokens": get_tokens(user),
+        }
 
 
-class UserProfileSerializer (serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['email', 'username', 'first_name', 'last_name']
-
-
-class SendPasswordResetEmailSerializer(serializers.Serializer):
-    email = serializers.EmailField(max_length=255)
-
-    class Meta:
-        fields = ['email']
+class UserChangePasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
 
     def validate(self, attrs):
-        try:
-            # Extract the email from the input data
-            email = attrs.get('email')
+        email = attrs.get("email")
 
-            # Check if a user with the given email exists
-            if User.objects.filter(email=email).exists():
-                user = User.objects.get(email=email)
+        if not User.objects.filter(email=email).exists():
+            raise AuthenticationFailed("Invalid credentials!")
 
-                # Generate a unique UID for the user
-                uidb64 = urlsafe_base64_encode(force_bytes(user.id))
-                
-                # Generate a token for password reset
-                token = PasswordResetTokenGenerator().make_token(user)
-                
-                # Build the password reset link using the context
-                request = self.context.get('request')
-                link = f'{request.scheme}://{request.get_host()}{request.path_info.split("/", 2)[0]}/auth/password-reset/{uidb64}/{token}/'
+        user = User.objects.get(email=email)
+        request = self.context.get("request")
 
-                # DEBUG: Print the link to the console during development
-                # print({'link': link})
-                
-                # PRODUCTION: Uncomment the following line to send a real email
-                send_email('Portfolio System', 'Reset Your Password',
-                           f'Click Following Link to Reset Your Password {link}',
-                           EMAIL_HOST_USER, [user.email], [])
+        send_password_reset_email(request, user)
 
-                # Ensure that the request is passed to the context
-                return {'uidb64': uidb64, 'token': token, 'link': link, 'request': request}
-
-            else:
-                # Raise an error if the email doesn't exist
-                raise serializers.ValidationError("Email doesn't exist")
-
-        except Exception as e:
-            # Raise an error if any exception occurs
-            raise serializers.ValidationError(str(e))
+        return super().validate(attrs)
 
 
 class UserPasswordResetSerializer(serializers.Serializer):
-    newPassword = serializers.CharField(max_length=255, style={'input_type': 'password'}, write_only=True)
-    newPassword2 = serializers.CharField(max_length=255, style={'input_type': 'password'}, write_only=True)
+    password = serializers.CharField(max_length=100, min_length=8, write_only=True)
+    password2 = serializers.CharField(max_length=100, min_length=8, write_only=True)
+    uidb64 = serializers.CharField(max_length=100, write_only=True)
+    token = serializers.CharField(max_length=100, write_only=True)
+    user_id = None
+    new_password = None
 
     class Meta:
-        fields = ['newPassword', 'newPassword2']
+        fields = ["password", "password2", "uidb64", "token"]
 
     def validate(self, attrs):
+        password = attrs.get("password")
+        password2 = attrs.get("password2")
+
+        if password != password2:
+            raise AuthenticationFailed("Passwords do not match!")
+
         try:
-            # Extract data from input
-            newPassword = attrs.get('newPassword')
-            newPassword2 = attrs.get('newPassword2')
-            uidb64 = self.context.get('uidb64')
-            token = self.context.get('token')
+            user = User.objects.get(id=get_user_id_by_uidb64(attrs.get("uidb64")))
 
-            # Check if newPassword and newPassword2 are the same
-            if newPassword != newPassword2:
-                raise serializers.ValidationError("Password and Confirm Password don't match")
+            if not check_for_password_reset_user_token(user, attrs.get("token")):
+                raise AuthenticationFailed("Invalid credentials!")
 
-            # Decode the UID to retrieve the user
-            id = smart_str(urlsafe_base64_decode(uidb64))
-            user = User.objects.get(id=id)
+            self.new_password = password
+            self.user_id = user.id
 
-            # Check if the token is valid
-            if not PasswordResetTokenGenerator().check_token(user, token):
-                raise serializers.ValidationError('Token is not valid or has expired')
+            return True
 
-            # Set the new password for the user
-            user.set_password(newPassword)
-            user.save()
-
-            return attrs
+        except User.DoesNotExist:
+            raise AuthenticationFailed("Invalid credentials!")
 
         except Exception as e:
-            # Handle any exceptions that might occur
-            raise serializers.ValidationError(str(e))
+            raise AuthenticationFailed(str(e))
+
+    def save(self, **kwargs):
+        if not (self.user_id and self.new_password):
+            raise AuthenticationFailed("Invalid credentials!")
+
+        user = User.objects.get(id=self.user_id)
+
+        user.set_password(self.new_password)
+        user.save()
+
+        delete_all_outstanding_tokens(self.user_id)
+        return
+
+
+class UserLogoutSerializer(serializers.Serializer):
+    refresh_token = serializers.CharField()
+
+    def validate(self, attrs):
+        self.refresh_token = attrs.get("refresh_token")
+        return attrs
+
+    def save(self, user_id, delete_all: bool = False, **kwargs):
+        if delete_all:
+            delete_all_outstanding_tokens(user_id)
+            return
+        delete_outstanding_token(user_id, self.refresh_token)
+        return
+
+
+class UserDeleteSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(max_length=100, min_length=8, write_only=True)
+
+    class Meta:
+        fields = ["email", "password"]
+
+    def validate(self, data):
+        email = data.get("email")
+        password = data.get("password")
+        request = self.context.get("request")
+
+        user = authenticate(request=request, email=email, password=password)
+
+        if not user:
+            raise AuthenticationFailed("Invalid credentials!")
+        if not user.is_active:
+            raise AuthenticationFailed("Account is not active!")
+
+        return data
+
+    def save(self, user_id, **kwargs):
+        user = User.objects.get(id=user_id)
+        user.delete()
+        return
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=False)
+    first_name = serializers.CharField(max_length=63)
+    last_name = serializers.CharField(max_length=63)
+
+    class Meta:
+        model = User
+        fields = ["email", "first_name", "last_name"]
+
+    def validate(self, attrs):
+        new_email = attrs.get("email")
+
+        if User.objects.filter(email=new_email).exists():
+            raise AuthenticationFailed("Email already exists!")
+
+        return super().validate(attrs)
+
+    def update(self, instance, validated_data):
+        instance.email = validated_data.get("email", instance.email)
+        instance.first_name = validated_data.get("first_name", instance.first_name)
+        instance.last_name = validated_data.get("last_name", instance.last_name)
+        delete_all_outstanding_tokens(instance.id)
+        instance.save()
+        return instance
+
+    def to_representation(self, instance):
+        return {"email": instance.email, "full_name": instance.get_full_name()}

@@ -2,16 +2,15 @@ from django.urls import path
 from .views import *
 
 
-app_name = 'authentication'
 urlpatterns = [
-    path('signup/', SignUpView.as_view(), name='signup'),
-    path('verify-email/<str:verification_token>/', VerifyEmailView.as_view(), name='verify-email'),
-    path('resend-verify-email/', ResendVerifyEmailView.as_view(), name='resend-verify-email'),
-    path('signin/', SignInView.as_view(), name='signin'),
-    path('signout/', LogoutView.as_view(), name='signout'),
-    path('profile-view/', UserProfileView.as_view(), name='profile-view'),
-    path('profile-update/', UserProfileView.as_view(), name='profile-update'),
-    path('send-email-password-reset/', SendPasswordResetEmailView.as_view(), name='send-email-to-reset-password'),
-    path('password-reset/<str:uidb64>/<str:token>/', UserPasswordResetView.as_view(), name='password-reset'),
-    path('delete-user/', DeleteUserView.as_view(), name='delete-user'),
+    path("register/", UserRegisterView.as_view(), name="register"),
+    path("register/verify", VerifyEmail.as_view(), name="verify-email"),
+    path("login/", UserLoginView.as_view(), name="login"),
+    path("logout/", UserLogoutView.as_view(), name="logout"),
+    path("profile/view/", UserProfileView.as_view(), name="profile-view"),
+    path("profile/update/", UserUpdateView.as_view(), name="profile-edit"),
+    path("profile/delete/", UserDeleteView.as_view(), name="profile-delete"),
+    path("password/change/", UserChangePasswordView.as_view(), name="user-password-change"),
+    path("password/verify/<str:uidb64>/<str:token>/", UserPasswordVerifyResetView.as_view(), name="user-password-reset"),
+    path("password/reset/", UserPasswordResetView.as_view(), name="user-password-reset"),
 ]
