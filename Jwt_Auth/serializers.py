@@ -3,7 +3,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth import authenticate
 from .models import User, OneTimePassword
 from .utils import (
-    send_password_reset_email,
+    set_password_reset_email,
     get_user_id_by_uidb64,
     check_for_password_reset_user_token,
     get_tokens,
@@ -69,14 +69,14 @@ class VerifyEmailSerializer(serializers.Serializer):
 
 
 class UserLoginSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.EmailField(write_only=True)
     password = serializers.CharField(max_length=100, min_length=8, write_only=True)
-    full_name = serializers.CharField(max_length=100, read_only=True)
-    tokens = serializers.DictField(read_only=True)
+    access_token = serializers.CharField(max_length=512, read_only=True)
+    refresh_token = serializers.CharField(max_length=512, read_only=True)
 
     class Meta:
         model = User
-        fields = ["email", "password", "full_name", "tokens"]
+        fields = ["email", "password", "access_token", "refresh_token"]
 
     def validate(self, data):
         email = data.get("email")
@@ -90,11 +90,7 @@ class UserLoginSerializer(serializers.Serializer):
         if not user.is_active:
             raise AuthenticationFailed("Account is not active!")
 
-        return {
-            "email": user.email,
-            "full_name": user.get_full_name(),
-            "tokens": get_tokens(user),
-        }
+        return get_tokens(user)
 
 
 class UserChangePasswordSerializer(serializers.Serializer):
@@ -109,7 +105,7 @@ class UserChangePasswordSerializer(serializers.Serializer):
         user = User.objects.get(email=email)
         request = self.context.get("request")
 
-        send_password_reset_email(request, user)
+        set_password_reset_email(request, user)
 
         return super().validate(attrs)
 
@@ -200,31 +196,42 @@ class UserDeleteSerializer(serializers.Serializer):
 
     def save(self, user_id, **kwargs):
         user = User.objects.get(id=user_id)
+        delete_all_outstanding_tokens(user_id)
         user.delete()
         return
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(required=False)
-    first_name = serializers.CharField(max_length=63)
-    last_name = serializers.CharField(max_length=63)
+    full_name = serializers.CharField(max_length=255, required=False)
 
     class Meta:
         model = User
-        fields = ["email", "first_name", "last_name"]
+        fields = ["email", "full_name"]
 
-    def validate(self, attrs):
+    def validate(self, attrs, instance):
         new_email = attrs.get("email")
 
-        if User.objects.filter(email=new_email).exists():
+        if not new_email:
+            return super().validate(attrs)
+        elif new_email == instance.email:
+            return super().validate(attrs)
+        elif User.objects.filter(email=new_email).exists():
             raise AuthenticationFailed("Email already exists!")
 
         return super().validate(attrs)
 
     def update(self, instance, validated_data):
         instance.email = validated_data.get("email", instance.email)
-        instance.first_name = validated_data.get("first_name", instance.first_name)
-        instance.last_name = validated_data.get("last_name", instance.last_name)
+
+        full_name = validated_data.get("full_name")
+        if full_name:
+                if "," in full_name:
+                    instance.first_name = full_name.split(", ")[1]
+                    instance.last_name = full_name.split(", ")[0]
+                else:
+                    raise ValueError("Invalid full name format")
+
         delete_all_outstanding_tokens(instance.id)
         instance.save()
         return instance

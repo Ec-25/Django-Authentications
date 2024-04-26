@@ -9,15 +9,19 @@ from datetime import datetime, timezone
 
 
 class IsAuthenticatedAndTokenValid(BasePermission):
+    """
+    Allows access only to authenticated users.
+    """
     def has_permission(self, request, view):
         if not bool(request.user and request.user.is_authenticated):
             return (
-                False
+                False  # User is not authenticated, token cannot be verified.
             )
 
+        # Get the Authorization header token
         authorization_header = request.headers.get("Authorization")
         if not authorization_header or not authorization_header.startswith("Bearer "):
-            return False
+            return False  # Authorization header is invalid
 
         try:
             bearer_token = authorization_header.split(" ")[1]
@@ -39,22 +43,31 @@ class IsAuthenticatedAndTokenValid(BasePermission):
                     token.created_at.strftime("%Y-%m-%d %H:%M:%S")
                     == iat.strftime("%Y-%m-%d %H:%M:%S")
                 ):
+                    # Check if the token is valid and has not expired.
                     if token.expires_at <= datetime.now(tz=timezone.utc):
                         return False
 
                     outstanding_token = token
-                    break
+                    break  # Valid token found.
 
             if not outstanding_token:
-                return False
+                return False  # The token does not exist or has expired.
 
             refresh_token = RefreshToken(outstanding_token.token)
             refresh_token.check_blacklist()
 
-            return True
+            return True  # The token is valid and the user is authenticated.
 
         except TokenError:
-            return False
+            return False  # The token is invalid
 
         except Exception as e:
             return False
+
+
+class IsStaffOrAdmin(BasePermission):
+    """
+    Allows access only to admin users.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_staff or request.user.is_superuser)

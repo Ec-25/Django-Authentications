@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from .permissions import IsAuthenticatedAndTokenValid
 from .models import User
 from .serializers import *
-from .utils import *
+from .utils import set_verification_email
 
 
 class UserRegisterView(APIView):
@@ -17,7 +17,7 @@ class UserRegisterView(APIView):
         serializer = self.serializer_class(data=request.data)
         if serializer.is_valid(raise_exception=True):
             serializer.save()
-            send_verification_email(request, serializer.data.get("email"))
+            set_verification_email(request, serializer.data.get("email"))
             return Response("Successfully registered!", status=status.HTTP_201_CREATED)
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -139,10 +139,12 @@ class UserUpdateView(APIView):
     serializer_class = UserUpdateSerializer
 
     def put(self, request):
-        serializer = self.serializer_class(
-            data=request.data, context={"request": request}
-        )
-        if serializer.is_valid(raise_exception=True):
+        try:
+            serializer = self.serializer_class(
+                data=request.data, context={"request": request}
+            )
+            serializer.validate(request.data, User.objects.get(id=request.user.id))
             serializer.update(User.objects.get(id=request.user.id), request.data)
             return Response(status=status.HTTP_204_NO_CONTENT)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(str(e), status=status.HTTP_400_BAD_REQUEST)
